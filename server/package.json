@@ -1,0 +1,13 @@
+{
+  "name": "delta-vision-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A机推流 -> 中继 -> B机网页雷达 (minimal loop)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

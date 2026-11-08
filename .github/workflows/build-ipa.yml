@@ -1,0 +1,41 @@
+# 云端构建未签名 IPA（免 Mac），产物交给巨魔安装
+# 用法: 把 delta-vision 目录推到 GitHub 仓库 -> Actions 页
+#       手动触发本工作流 -> 下载 DeltaVision-ipa 制品
+name: Build IPA
+
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成工程
+        run: cd ios && xcodegen generate
+
+      - name: 编译归档(不签名, 由巨魔安装时自签)
+        run: |
+          cd ios
+          xcodebuild archive \
+            -project DeltaVision.xcodeproj \
+            -scheme DeltaVision \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/DeltaVision.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=
+
+      - name: 打包 IPA
+        run: |
+          mkdir -p Payload
+          cp -R ios/build/DeltaVision.xcarchive/Products/Applications/DeltaVision.app Payload/
+          zip -qr DeltaVision.ipa Payload
+          ls -lh DeltaVision.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeltaVision-ipa
+          path: DeltaVision.ipa

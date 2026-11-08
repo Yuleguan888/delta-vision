@@ -1,0 +1,61 @@
+# XcodeGen 配置 —— 一键生成 Xcode 工程(本机 Mac)或 CI 云构建
+# Mac 本地: brew install xcodegen && cd ios && xcodegen generate
+# 云构建: 看仓库根目录 .github/workflows/build-ipa.yml
+name: DeltaVision
+options:
+  bundleIdPrefix: com.deltavision
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+targets:
+  DeltaVision:
+    type: application
+    platform: iOS
+    sources: [App]
+    info:
+      path: App/Info.plist
+      properties:
+        UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: 需要连接局域网中继服务器
+        # 巨魔自签应用, 允许明文 ws:// 连局域网中继
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.deltavision.app
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    dependencies:
+      - target: StreamExt
+  StreamExt:
+    type: app-extension
+    platform: iOS
+    sources: [StreamExt]
+    info:
+      path: StreamExt/Info.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).SampleHandler"
+        RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.deltavision.app.StreamExt
+        CODE_SIGN_STYLE: Automatic
+        SKIP_INSTALL: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    dependencies:
+      - sdk: ReplayKit.framework
+      - sdk: CoreImage.framework
+      - sdk: ImageIO.framework
+      - sdk: UniformTypeIdentifiers.framework
+schemes:
+  DeltaVision:
+    build:
+      targets:
+        DeltaVision: all
+        StreamExt: all
+    archive:
+      config: Release

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Delta Vision 雷达面板</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0b0f14; color:#cfe3ff; font-family:system-ui,sans-serif; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:flex; flex-direction:column; }
+  #canvasBox { position:relative; flex:1; background:#000; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+  #overlay { position:absolute; inset:0; pointer-events:none; }
+  #panel { background:#111826; padding:8px 10px; font-size:13px; line-height:1.9; }
+  #panel label { margin-right:6px; }
+  input[type=range] { vertical-align:middle; width:110px; }
+  #panel button { background:#1e6feb; color:#fff; border:0; border-radius:4px; padding:3px 12px; }
+  #panel button.off { background:#444; }
+  #stat { position:absolute; top:6px; left:8px; font-size:12px; background:rgba(0,0,0,.55);
+          padding:3px 8px; border-radius:4px; pointer-events:none; z-index:5; }
+  .row { display:flex; flex-wrap:wrap; gap:2px 12px; align-items:center; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="canvasBox">
+    <canvas id="c"></canvas>
+    <canvas id="overlay"></canvas>
+    <div id="stat">未连接</div>
+  </div>
+  <div id="panel">
+    <div class="row">
+      <label><input type="checkbox" id="detect" checked>红点检测</label>
+      <label>R≥<input type="range" id="rMin" min="80" max="230" value="140"><span id="rMinV">140</span></label>
+      <label>G≤<input type="range" id="gMax" min="40" max="160" value="90"><span id="gMaxV">90</span></label>
+      <label>B≤<input type="range" id="bMax" min="40" max="160" value="90"><span id="bMaxV">90</span></label>
+    </div>
+    <div class="row">
+      <label>格子<input type="range" id="cell" min="8" max="40" value="16"><span id="cellV">16</span></label>
+      <label>每格红点≥<input type="range" id="minCnt" min="1" max="40" value="6"><span id="minCntV">6</span></label>
+      <label>缩放<input type="range" id="scale" min="0.25" max="0.6" step="0.05" value="0.4"><span id="scaleV">0.4</span></label>
+      <button id="calib">重连</button>
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const c = $('c'), ov = $('overlay'), ctx = c.getContext('2d'), octx = ov.getContext('2d');
+let ws = null, lastTs = 0, frames = 0, fps = 0;
+
+// ---- 参数绑定 ----
+const P = { detect:true, rMin:140, gMax:90, bMax:90, cell:16, minCnt:6, scale:0.4 };
+for (const [id, key] of [['rMin','rMin'],['gMax','gMax'],['bMax','bMax'],['cell','cell'],['minCnt','minCnt'],['scale','scale']]) {
+  $(id).addEventListener('input', e => {
+    P[key] = Number(e.target.value); $(id+'V').textContent = e.target.value;
+  });
+}
+$('detect').addEventListener('change', e => P.detect = e.target.checked);
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/stream?role=viewer`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => $('stat').textContent = '等待推流…';
+  ws.onclose = () => { $('stat').textContent = '断开，3秒后重连'; setTimeout(connect, 3000); };
+  ws.onmessage = async ev => {
+    const t0 = performance.now();
+    const bmp = await createImageBitmap(new Blob([ev.data], {type:'image/jpeg'}));
+    const now = performance.now();
+    if (lastTs) fps = fps*0.85 + 1000/(now-lastTs)*0.15;
+    lastTs = now;
+    c.width = bmp.width; c.height = bmp.height;
+    ctx.drawImage(bmp, 0, 0);
+    if (P.detect) detect(bmp);
+    else octx.clearRect(0, 0, ov.width, ov.height);
+    frames++;
+    $('stat').textContent =
+      `fps ${fps.toFixed(1)} · 帧 ${frames} · 解析 ${(performance.now()-t0).toFixed(0)}ms · ${bmp.width}x${bmp.height}`;
+    bmp.close();
+  };
+}
+$('calib').addEventListener('click', () => { ws.close(); connect(); });
+connect();
+
+// ---- 红点检测: 缩略图网格统计 + 8连通聚类 ----
+function detect(bmp) {
+  const w = Math.max(64, Math.round(bmp.width * P.scale));
+  const h = Math.max(36, Math.round(bmp.height * P.scale));
+  const off = document.createElement('canvas'); off.width = w; off.height = h;
+  const octx2 = off.getContext('2d', { willReadFrequently: true });
+  octx2.drawImage(bmp, 0, 0, w, h);
+  const img = octx2.getImageData(0, 0, w, h).data;
+  const cw = Math.ceil(w / P.cell), ch = Math.ceil(h / P.cell);
+  const grid = new Uint8Array(cw * ch);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y*w + x) * 4;
+    if (img[i] >= P.rMin && img[i+1] <= P.gMax && img[i+2] <= P.bMax) grid[(y/P.cell|0)*cw + (x/P.cell|0)]++;
+  }
+  const hit = new Uint8Array(cw * ch);
+  const cells = [];
+  for (let i = 0; i < grid.length; i++) if (grid[i] >= P.minCnt) { hit[i] = 1; cells.push(i); }
+  // 8连通聚类
+  const seen = new Uint8Array(cells.length);
+  const clusters = [];
+  for (let ci = 0; ci < cells.length; ci++) {
+    if (seen[ci]) continue;
+    const q = [cells[ci]]; seen[ci] = 1; let sumX = 0, sumY = 0, n = 0;
+    while (q.length) {
+      const cur = q.pop(); const cx = cur % cw, cy = (cur / cw) | 0;
+      sumX += cx; sumY += cy; n++;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= cw || ny >= ch) continue;
+        const ni = ny*cw + nx, si = cells.indexOf(ni);
+        if (si >= 0 && !seen[si]) { seen[si] = 1; q.push(ni); }
+      }
+    }
+    clusters.push({ x: sumX/n, y: sumY/n, n });
+  }
+  // 画回原尺寸
+  ov.width = c.width; ov.height = c.height;
+  octx.clearRect(0, 0, ov.width, ov.height);
+  const sx = c.width / w, sy = c.height / h;
+  for (const cl of clusters) {
+    if (cl.n < 1) continue;
+    const r = Math.max(10, Math.sqrt(cl.n) * P.cell * sx * 0.6);
+    octx.strokeStyle = '#ff3b30'; octx.lineWidth = 2;
+    octx.beginPath(); octx.arc(cl.x*P.cell*sx, cl.y*P.cell*sy, r, 0, Math.PI*2); octx.stroke();
+    octx.fillStyle = '#ff3b30';
+    octx.fillText('敌方', cl.x*P.cell*sx + r, cl.y*P.cell*sy - r);
+  }
+}
+</script>
+</body>
+</html>
