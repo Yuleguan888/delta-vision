@@ -2,11 +2,14 @@
 // 模式1(推荐): 扩展推流, 调起系统广播选择器选 StreamExt, 后台稳定
 // 模式2(备选): 应用内推流, 免扩展, TrollStore 下扩展不被系统识别时用这个
 // v3: 握手确认后再发帧(ping-pong) + 丢帧式发送队列 + 延迟重连, 修"一帧就断"
+// v4: 服务端hello确认握手(绕开iOS sendPing兼容问题)
+// v5: 静音音频后台保活, 切游戏后网络不断
 import SwiftUI
 import ReplayKit
 import CoreImage
 import ImageIO
 import UniformTypeIdentifiers
+import AVFoundation
 
 @main
 struct DeltaVisionApp: App {
@@ -84,6 +87,7 @@ final class InAppStreamer: NSObject {
         if running { return }
         running = true
         session = URLSession(configuration: .default)
+        startSilentAudio()   // 后台保活: 静音循环播放, 切游戏后网络不被挂起
         connect()
         RPScreenRecorder.shared().startCapture(handler: { [weak self] buf, type, _ in
             guard type == .video, let self,
@@ -179,10 +183,52 @@ final class InAppStreamer: NSObject {
     func stop() {
         running = false
         RPScreenRecorder.shared().stopCapture { _ in }
+        silentPlayer?.stop()
         reconnectTimer?.cancel()
         helloFallback?.cancel()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
+    }
+
+    // ---- 后台保活: UIBackgroundModes=audio + 静音循环 ----
+    private var silentPlayer: AVAudioPlayer?
+
+    private func startSilentAudio() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default)
+            try session.setActive(true)
+            silentPlayer = try AVAudioPlayer(data: Self.silentWAV(seconds: 5))
+            silentPlayer?.numberOfLoops = -1
+            silentPlayer?.volume = 0
+            silentPlayer?.play()
+            print("[InApp] 静音保活已启动")
+        } catch {
+            print("[InApp] 静音保活失败: \(error.localizedDescription)")
+        }
+    }
+
+    // 生成 5 秒 16bit 单声道 44.1kHz 全零 WAV
+    private static func silentWAV(seconds: Int) -> Data {
+        let sampleRate = 44100, channels = 1, bits = 16
+        let byteRate = sampleRate * channels * bits / 8
+        let dataSize = byteRate * seconds
+        var d = Data()
+        d.append(contentsOf: Array("RIFF".utf8))
+        d.append(contentsOf: withUnsafeBytes(of: UInt32(36 + dataSize).littleEndian) { Data($0) })
+        d.append(contentsOf: Array("WAVE".utf8))
+        d.append(contentsOf: Array("fmt ".utf8))
+        d.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Data($0) })
+        d.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })
+        d.append(contentsOf: withUnsafeBytes(of: UInt16(channels).littleEndian) { Data($0) })
+        d.append(contentsOf: withUnsafeBytes(of: UInt32(sampleRate).littleEndian) { Data($0) })
+        d.append(contentsOf: withUnsafeBytes(of: UInt32(byteRate).littleEndian) { Data($0) })
+        d.append(contentsOf: withUnsafeBytes(of: UInt16(channels * bits / 8).littleEndian) { Data($0) })
+        d.append(contentsOf: withUnsafeBytes(of: UInt16(bits).littleEndian) { Data($0) })
+        d.append(contentsOf: Array("data".utf8))
+        d.append(contentsOf: withUnsafeBytes(of: UInt32(dataSize).littleEndian) { Data($0) })
+        d.append(contentsOf: Data(count: dataSize))
+        return d
     }
 
     private func jpeg(from buffer: CMSampleBuffer, scale: CGFloat, quality: CGFloat) -> Data? {

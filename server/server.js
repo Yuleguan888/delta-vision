@@ -35,6 +35,25 @@ const viewers = new Set();
 
 function stats() { return { streamers: streamers.size, viewers: viewers.size }; }
 
+// 心跳扫活: 每 30 秒 ping 所有客户端, 没回 pong 的僵尸连接直接掐掉
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (!ws.isAlive) { try { ws.terminate(); } catch (_) {} continue; }
+    ws.isAlive = false;
+    try { ws.ping(); } catch (_) {}
+  }
+}, 30000);
+
+// viewer 日志降噪: 数量变化>=10 或归零才打
+let lastViewerLog = -1;
+function logViewers(tag) {
+  const n = viewers.size;
+  if (Math.abs(n - lastViewerLog) >= 10 || n === 0) {
+    console.log(`[viewers] ${tag} 共${n}个`);
+    lastViewerLog = n;
+  }
+}
+
 function broadcast(roleSet, data, isBinary, from) {
   for (const s of roleSet) {
     if (s === from || s.readyState !== 1) continue;
@@ -45,12 +64,26 @@ function broadcast(roleSet, data, isBinary, from) {
 wss.on('connection', (ws, req) => {
   const role = new URL(req.url, 'http://x').searchParams.get('role') || 'viewer';
   const ip = req.socket.remoteAddress;
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   if (role === 'streamer') {
     streamers.add(ws);
     // 握手确认: 服务端主动发 hello, 客户端收到后开始推帧(绕开 iOS sendPing 兼容问题)
     try { ws.send(JSON.stringify({ type: 'hello' })); } catch (_) {}
-  } else viewers.add(ws);
+  } else {
+    // 同 IP 只留最新一个 viewer(浏览器反复刷新产生的僵尸连接直接关旧)
+    for (const v of viewers) {
+      if (v._ip === ip) {
+        try { v.close(4000, 'replaced'); } catch (_) {}
+        viewers.delete(v);
+      }
+    }
+    ws._ip = ip;
+    viewers.add(ws);
+  }
   console.log(`[+] ${role} 接入 ${ip}  当前 ${JSON.stringify(stats())}`);
+  logViewers('接入后');
 
   // 通知 streamer 有几个观众
   broadcast(streamers, JSON.stringify({ type: 'stats', viewers: viewers.size }), false, null);
@@ -64,7 +97,11 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', (code) => {
     if (role === 'streamer') streamers.delete(ws); else viewers.delete(ws);
-    console.log(`[-] ${role} 断开 ${ip} close=${code} 已推帧=${frames} 当前 ${JSON.stringify(stats())}`);
+    if (role === 'streamer') {
+      console.log(`[-] streamer 断开 ${ip} close=${code} 已推帧=${frames} 当前 ${JSON.stringify(stats())}`);
+    } else {
+      logViewers('断开后');
+    }
     broadcast(streamers, JSON.stringify({ type: 'stats', viewers: viewers.size }), false, null);
   });
 

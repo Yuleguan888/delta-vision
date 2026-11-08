@@ -17,6 +17,8 @@ targets:
       properties:
         UILaunchScreen: {}
         NSLocalNetworkUsageDescription: 需要连接局域网中继服务器
+        # 后台保活: 切游戏后保持推流
+        UIBackgroundModes: [audio]
         # 巨魔自签应用, 允许明文 ws:// 连局域网中继
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
