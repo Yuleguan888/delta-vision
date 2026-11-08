@@ -29,6 +29,7 @@
     <div id="stat">未连接</div>
   </div>
   <div id="panel">
+    <div class="row" id="aidHint" style="color:#ffd166;font-weight:600;"></div>
     <div class="row">
       <label><input type="checkbox" id="detect" checked>红点检测</label>
       <label>R≥<input type="range" id="rMin" min="80" max="230" value="140"><span id="rMinV">140</span></label>
@@ -48,6 +49,9 @@ const $ = id => document.getElementById(id);
 const c = $('c'), ov = $('overlay'), ctx = c.getContext('2d'), octx = ov.getContext('2d');
 let ws = null, lastTs = 0, frames = 0, fps = 0;
 
+// A机地址提示: 按当前访问的IP自动生成, 照抄进iPhone的App地址框
+$('aidHint').textContent = 'A机App地址填: ws://' + location.hostname + ':8900/stream?role=streamer';
+
 // ---- 参数绑定 ----
 const P = { detect:true, rMin:140, gMax:90, bMax:90, cell:16, minCnt:6, scale:0.4 };
 for (const [id, key] of [['rMin','rMin'],['gMax','gMax'],['bMax','bMax'],['cell','cell'],['minCnt','minCnt'],['scale','scale']]) {
@@ -63,6 +67,7 @@ function connect() {
   ws.onopen = () => $('stat').textContent = '等待推流…';
   ws.onclose = () => { $('stat').textContent = '断开，3秒后重连'; setTimeout(connect, 3000); };
   ws.onmessage = async ev => {
+    if (!(ev.data instanceof ArrayBuffer)) return;   // 忽略 ping 等文本消息
     const t0 = performance.now();
     const bmp = await createImageBitmap(new Blob([ev.data], {type:'image/jpeg'}));
     const now = performance.now();

@@ -1,6 +1,7 @@
 // iOS 真机推流骨架 —— Broadcast Upload Extension
 // 作用: 用系统录屏(ReplayKit)抓游戏画面, 每帧压 JPEG, 走 WS 推到中继服务
 // 免越狱、不碰游戏进程, 全设备通用(游戏机为 iPad/iPhone 均可)
+// v3: ping-pong 握手确认 + 丢帧式发送, 修"一帧就断"
 //
 // 集成步骤(需 Mac + Xcode + Apple 开发者账号):
 // 1. Xcode 新建 iOS App 项目
@@ -25,40 +26,86 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var task: URLSessionWebSocketTask?
     private var queue = DispatchQueue(label: "stream.send", qos: .userInitiated)
     private var frameCount = 0
+    private var connected = false
+    private var pending: Data?
+    private var sending = false
+    private var reconnectTimer: DispatchWorkItem?
 
     // ===== 改成你的中继地址 =====
-    // 副机是电脑: 填电脑局域网IP(如 ws://192.168.1.x:8900/stream?role=streamer)
-    // 副机是这台手机: 填手机局域网IP(当前 192.168.0.254)
-    // 两地跨网: 填 VPS 公网IP/域名
-    private let serverURL = URL(string: "ws://192.168.0.254:8900/stream?role=streamer")!
+    private let serverURL = URL(string: "ws://192.168.118.237:8900/stream?role=streamer")!
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForResource = 600
         session = URLSession(configuration: config)
-        task = session?.webSocketTask(with: serverURL)
-        task?.resume()
+        connect()
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer,
                                       with sampleBufferType: RPSampleBufferType) {
         guard sampleBufferType == .video,
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        // 压到 0.4x 尺寸降带宽: 处理小图再放大像素, 识别够用
-        guard let jpeg = jpegData(from: pixelBuffer, scale: 0.4, quality: 0.5) else { return }
-        queue.async { [weak self] in
-            self?.task?.send(.data(jpeg)) { _ in }
-        }
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let jpeg = jpegData(from: pixelBuffer, scale: 0.4, quality: 0.5) else { return }
+        queue.async { [weak self] in self?.enqueue(jpeg) }
         frameCount += 1
-        if frameCount % 300 == 0 {
-            print("[StreamExt] 已推 \(frameCount) 帧")
-        }
+        if frameCount % 300 == 0 { print("[StreamExt] 已编码 \(frameCount) 帧") }
     }
 
     override func broadcastFinished() {
+        reconnectTimer?.cancel()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         session = nil
+    }
+
+    // ---- 与 App 端一致的握手确认 + 丢帧式发送 ----
+    private func connect() {
+        task?.cancel(with: .goingAway, reason: nil)
+        guard let session else { return }
+        connected = false
+        task = session.webSocketTask(with: serverURL)
+        task?.resume()
+        task?.sendPing { [weak self] err in
+            guard let self else { return }
+            if let err {
+                print("[StreamExt] 握手失败: \(err.localizedDescription.prefix(80))")
+                self.scheduleReconnect()
+            } else {
+                self.queue.async {
+                    self.connected = true
+                    self.drain()
+                }
+            }
+        }
+    }
+
+    private func enqueue(_ data: Data) {
+        pending = data
+        drain()
+    }
+
+    private func drain() {
+        guard connected, !sending, let data = pending else { return }
+        pending = nil
+        sending = true
+        task?.send(.data(data)) { [weak self] err in
+            guard let self else { return }
+            self.sending = false
+            if let err {
+                self.connected = false
+                print("[StreamExt] 发送失败: \(err.localizedDescription.prefix(60))")
+                self.scheduleReconnect()
+            } else {
+                self.queue.async { self.drain() }
+            }
+        }
+    }
+
+    private func scheduleReconnect() {
+        reconnectTimer?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.connect() }
+        reconnectTimer = work
+        queue.asyncAfter(deadline: .now() + 2, execute: work)
     }
 
     // CVPixelBuffer -> 缩放 -> JPEG
