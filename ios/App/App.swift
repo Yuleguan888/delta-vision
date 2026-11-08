@@ -29,7 +29,7 @@ struct ContentView: View {
                 InAppStreamer.shared.start()
             }.buttonStyle(PrimaryBtn())
             Button("停止") {
-                RPScreenRecorder.shared().stopRecording { _ in }
+                RPScreenRecorder.shared().stopRecording { _, _ in }
                 InAppStreamer.shared.stop()
                 msg = "已停止"
             }.buttonStyle(PrimaryBtn())
