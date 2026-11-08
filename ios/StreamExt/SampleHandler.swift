@@ -86,17 +86,16 @@ class SampleHandler: RPBroadcastSampleHandler {
             guard let self, self.task === task else { return }
             switch result {
             case .success(let msg):
-                if case .string(let s) = msg, s.contains("hello") {
+                if case .string(let s) = msg, s.contains("hello"), !self.connected {
                     self.helloFallback?.cancel()
                     self.queue.async {
                         self.connected = true
                         self.drain()
                     }
-                } else {
-                    self.waitHello()
                 }
+                self.waitHello()   // 持续消费消息, 防止积压
             case .failure(let err):
-                print("[StreamExt] 连接失败: \(err.localizedDescription.prefix(80))")
+                print("[StreamExt] 连接断开: \(err.localizedDescription.prefix(80))")
                 self.connected = false
                 self.scheduleReconnect()
             }

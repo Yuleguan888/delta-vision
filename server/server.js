@@ -61,6 +61,15 @@ function broadcast(roleSet, data, isBinary, from) {
   }
 }
 
+// 观众数通知限频: 最多 2 秒一次, 防止雷达页疯狂重连时把 streamer 的接收缓冲打爆
+let lastStatsAt = 0;
+function broadcastStats() {
+  const now = Date.now();
+  if (now - lastStatsAt < 2000) return;
+  lastStatsAt = now;
+  broadcast(streamers, JSON.stringify({ type: 'stats', viewers: viewers.size }), false, null);
+}
+
 wss.on('connection', (ws, req) => {
   const role = new URL(req.url, 'http://x').searchParams.get('role') || 'viewer';
   const ip = req.socket.remoteAddress;
@@ -85,8 +94,8 @@ wss.on('connection', (ws, req) => {
   console.log(`[+] ${role} 接入 ${ip}  当前 ${JSON.stringify(stats())}`);
   logViewers('接入后');
 
-  // 通知 streamer 有几个观众
-  broadcast(streamers, JSON.stringify({ type: 'stats', viewers: viewers.size }), false, null);
+  // 通知 streamer 有几个观众(限频)
+  broadcastStats();
 
   let frames = 0;
   ws.on('message', (data, isBinary) => {
@@ -102,7 +111,7 @@ wss.on('connection', (ws, req) => {
     } else {
       logViewers('断开后');
     }
-    broadcast(streamers, JSON.stringify({ type: 'stats', viewers: viewers.size }), false, null);
+    broadcastStats();
   });
 
   ws.on('error', () => {});

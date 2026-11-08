@@ -108,7 +108,7 @@ final class InAppStreamer: NSObject {
         connected = false
         task = session.webSocketTask(with: url)
         task?.resume()
-        waitHello()
+        startReceiveLoop()
         helloFallback?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.connected, self.running else { return }
@@ -121,13 +121,14 @@ final class InAppStreamer: NSObject {
         queue.asyncAfter(deadline: .now() + 3, execute: work)
     }
 
-    private func waitHello() {
+    // 持续消费服务端消息(hello/stats), 防止消息积压导致 iOS 掐断连接
+    private func startReceiveLoop() {
         guard let task, task === self.task else { return }
         task.receive { [weak self] result in
             guard let self, self.task === task, self.running else { return }
             switch result {
             case .success(let msg):
-                if case .string(let s) = msg, s.contains("hello") {
+                if case .string(let s) = msg, s.contains("hello"), !self.connected {
                     self.helloFallback?.cancel()
                     self.queue.async {
                         self.connected = true
@@ -136,16 +137,15 @@ final class InAppStreamer: NSObject {
                         }
                         self.drain()
                     }
-                } else {
-                    self.waitHello()   // stats 等其他消息, 继续等 hello
                 }
+                self.startReceiveLoop()   // 消息一律消费掉, 立刻再挂一个 receive
             case .failure(let err):
-                print("[InApp] 连接失败: \(err.localizedDescription.prefix(80))")
                 self.connected = false
-                DispatchQueue.main.async {
-                    InAppStreamer.onStatus?("❌ 连不上中继\n1.确认 iPhone 与中继同一网络\n2.设置→隐私与安全→本地网络→允许本App\n3.检查上面填的地址")
+                print("[InApp] 连接断开: \(err.localizedDescription.prefix(80))")
+                if self.running {
+                    DispatchQueue.main.async { InAppStreamer.onStatus?("⚠️ 与中继断开, 重连中…") }
+                    self.scheduleReconnect()
                 }
-                self.scheduleReconnect()
             }
         }
     }
