@@ -60,26 +60,36 @@ async def main():
         except ImportError:
             print("[!] 未装 cv2，回退合成画面 (pip install opencv-python-headless)")
     print(f"[streamer] 推流地址 {URL}  {'视频源:' + VIDEO if use_cv2 else '合成画面'}")
-    async with websockets.connect(URL, max_size=8 * 1024 * 1024) as ws:
-        t0 = time.time(); n = 0
-        interval = 1.0 / FPS
-        while True:
-            t = time.time() - t0
-            if use_cv2:
-                ok, frame = cap.read()
-                if not ok:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0); continue
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(rgb)
-            else:
-                img = synth_frame(t)
-            buf = BytesIO()
-            img.save(buf, "JPEG", quality=JPEG_Q)
-            await ws.send(buf.getvalue())
-            n += 1
-            if n % 150 == 0:
-                print(f"[streamer] 已推 {n} 帧, 平均 {n/(t+1e-9):.1f} fps")
-            await asyncio.sleep(max(0, interval - (time.time() - (t0 + n * interval))))
+    while True:  # 断线自动重连(手机休眠/网络抖动不中断)
+        try:
+            # ping_interval=None: 关掉保活超时, 避免休眠后误判断线
+            async with websockets.connect(URL, max_size=8 * 1024 * 1024,
+                                          ping_interval=None, ping_timeout=None) as ws:
+                await push_loop(ws, cap, use_cv2)
+        except Exception as e:
+            print(f"[streamer] 连接断开: {type(e).__name__}, 3秒后重连...")
+            await asyncio.sleep(3)
+
+async def push_loop(ws, cap, use_cv2):
+    t0 = time.time(); n = 0
+    interval = 1.0 / FPS
+    while True:
+        t = time.time() - t0
+        if use_cv2:
+            ok, frame = cap.read()
+            if not ok:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0); continue
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
+        else:
+            img = synth_frame(t)
+        buf = BytesIO()
+        img.save(buf, "JPEG", quality=JPEG_Q)
+        await ws.send(buf.getvalue())
+        n += 1
+        if n % 150 == 0:
+            print(f"[streamer] 已推 {n} 帧, 平均 {n/(t+1e-9):.1f} fps")
+        await asyncio.sleep(max(0, interval - (time.time() - (t0 + n * interval))))
 
 if __name__ == "__main__":
     asyncio.run(main())
