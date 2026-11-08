@@ -74,10 +74,11 @@ final class InAppStreamer: NSObject {
     private let queue = DispatchQueue(label: "inapp.net", qos: .userInitiated)
     private var n = 0
     private var running = false
-    private var connected = false      // ping-pong 确认后才为 true
+    private var connected = false      // 收到服务器 hello 后才为 true
     private var pending: Data?         // 丢帧式: 只留最新一帧
     private var sending = false
     private var reconnectTimer: DispatchWorkItem?
+    private var helloFallback: DispatchWorkItem?
 
     func start() {
         if running { return }
@@ -95,7 +96,7 @@ final class InAppStreamer: NSObject {
         })
     }
 
-    // 握手确认: ping 成功才标记已连接, 避免握手没完成就发帧导致"一帧就断"
+    // 握手确认: 等服务端 hello 消息(不用 sendPing, iOS 16 上兼容性差); 3 秒兜底
     private func connect() {
         guard running else { return }
         task?.cancel(with: .goingAway, reason: nil)
@@ -103,22 +104,44 @@ final class InAppStreamer: NSObject {
         connected = false
         task = session.webSocketTask(with: url)
         task?.resume()
-        task?.sendPing { [weak self] err in
-            guard let self else { return }
-            if let err {
-                print("[InApp] 握手失败: \(err.localizedDescription.prefix(80))")
+        waitHello()
+        helloFallback?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.connected, self.running else { return }
+            self.queue.async {   // 3 秒没收到 hello 也开推, 发帧失败会走重连
+                self.connected = true
+                self.drain()
+            }
+        }
+        helloFallback = work
+        queue.asyncAfter(deadline: .now() + 3, execute: work)
+    }
+
+    private func waitHello() {
+        guard let task, task === self.task else { return }
+        task.receive { [weak self] result in
+            guard let self, self.task === task, self.running else { return }
+            switch result {
+            case .success(let msg):
+                if case .string(let s) = msg, s.contains("hello") {
+                    self.helloFallback?.cancel()
+                    self.queue.async {
+                        self.connected = true
+                        DispatchQueue.main.async {
+                            InAppStreamer.onStatus?("✅ 已连上中继, 推流中(切到游戏)")
+                        }
+                        self.drain()
+                    }
+                } else {
+                    self.waitHello()   // stats 等其他消息, 继续等 hello
+                }
+            case .failure(let err):
+                print("[InApp] 连接失败: \(err.localizedDescription.prefix(80))")
+                self.connected = false
                 DispatchQueue.main.async {
                     InAppStreamer.onStatus?("❌ 连不上中继\n1.确认 iPhone 与中继同一网络\n2.设置→隐私与安全→本地网络→允许本App\n3.检查上面填的地址")
                 }
                 self.scheduleReconnect()
-            } else {
-                self.queue.async {
-                    self.connected = true
-                    DispatchQueue.main.async {
-                        InAppStreamer.onStatus?("✅ 已连上中继, 推流中(切到游戏)")
-                    }
-                    self.drain()
-                }
             }
         }
     }
@@ -157,6 +180,7 @@ final class InAppStreamer: NSObject {
         running = false
         RPScreenRecorder.shared().stopCapture { _ in }
         reconnectTimer?.cancel()
+        helloFallback?.cancel()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
     }

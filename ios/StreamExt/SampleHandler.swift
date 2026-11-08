@@ -30,6 +30,7 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var pending: Data?
     private var sending = false
     private var reconnectTimer: DispatchWorkItem?
+    private var helloFallback: DispatchWorkItem?
 
     // ===== 改成你的中继地址 =====
     private let serverURL = URL(string: "ws://192.168.118.237:8900/stream?role=streamer")!
@@ -53,28 +54,51 @@ class SampleHandler: RPBroadcastSampleHandler {
 
     override func broadcastFinished() {
         reconnectTimer?.cancel()
+        helloFallback?.cancel()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         session = nil
     }
 
-    // ---- 与 App 端一致的握手确认 + 丢帧式发送 ----
+    // ---- 与服务端 hello 确认握手 + 丢帧式发送 ----
     private func connect() {
         task?.cancel(with: .goingAway, reason: nil)
         guard let session else { return }
         connected = false
         task = session.webSocketTask(with: serverURL)
         task?.resume()
-        task?.sendPing { [weak self] err in
-            guard let self else { return }
-            if let err {
-                print("[StreamExt] 握手失败: \(err.localizedDescription.prefix(80))")
-                self.scheduleReconnect()
-            } else {
-                self.queue.async {
-                    self.connected = true
-                    self.drain()
+        waitHello()
+        helloFallback?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.connected else { return }
+            self.queue.async {
+                self.connected = true
+                self.drain()
+            }
+        }
+        helloFallback = work
+        queue.asyncAfter(deadline: .now() + 3, execute: work)
+    }
+
+    private func waitHello() {
+        guard let task, task === self.task else { return }
+        task.receive { [weak self] result in
+            guard let self, self.task === task else { return }
+            switch result {
+            case .success(let msg):
+                if case .string(let s) = msg, s.contains("hello") {
+                    self.helloFallback?.cancel()
+                    self.queue.async {
+                        self.connected = true
+                        self.drain()
+                    }
+                } else {
+                    self.waitHello()
                 }
+            case .failure(let err):
+                print("[StreamExt] 连接失败: \(err.localizedDescription.prefix(80))")
+                self.connected = false
+                self.scheduleReconnect()
             }
         }
     }

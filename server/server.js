@@ -45,20 +45,26 @@ function broadcast(roleSet, data, isBinary, from) {
 wss.on('connection', (ws, req) => {
   const role = new URL(req.url, 'http://x').searchParams.get('role') || 'viewer';
   const ip = req.socket.remoteAddress;
-  if (role === 'streamer') streamers.add(ws); else viewers.add(ws);
+  if (role === 'streamer') {
+    streamers.add(ws);
+    // 握手确认: 服务端主动发 hello, 客户端收到后开始推帧(绕开 iOS sendPing 兼容问题)
+    try { ws.send(JSON.stringify({ type: 'hello' })); } catch (_) {}
+  } else viewers.add(ws);
   console.log(`[+] ${role} 接入 ${ip}  当前 ${JSON.stringify(stats())}`);
 
   // 通知 streamer 有几个观众
   broadcast(streamers, JSON.stringify({ type: 'stats', viewers: viewers.size }), false, null);
 
+  let frames = 0;
   ws.on('message', (data, isBinary) => {
     if (role !== 'streamer') return; // viewer 不给服务端推数据
+    if (isBinary && ++frames % 120 === 0) console.log(`[帧流] ${ip} 已推 ${frames} 帧`);
     broadcast(viewers, data, isBinary, null); // 转发给所有 B 机
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code) => {
     if (role === 'streamer') streamers.delete(ws); else viewers.delete(ws);
-    console.log(`[-] ${role} 断开 ${ip}  当前 ${JSON.stringify(stats())}`);
+    console.log(`[-] ${role} 断开 ${ip} close=${code} 已推帧=${frames} 当前 ${JSON.stringify(stats())}`);
     broadcast(streamers, JSON.stringify({ type: 'stats', viewers: viewers.size }), false, null);
   });
 
