@@ -1,9 +1,12 @@
 # 云端构建未签名 IPA（免 Mac），产物交给巨魔安装
 # 用法: 把 delta-vision 目录推到 GitHub 仓库 -> Actions 页
 #       手动触发本工作流 -> 下载 DeltaVision-ipa 制品
+# 也可直接 push 触发(临时方便 OAuth token 无 workflow 权限时自动构建)
 name: Build IPA
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  push:
 
 jobs:
   build:
